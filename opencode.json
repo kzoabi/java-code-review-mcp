@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "java-code-review": {
+      "type": "local",
+      "command": ["python", "src/server.py"],
+      "enabled": true,
+      "description": "Java Code Review MCP Server - Senior Engineer Level"
+    }
+  }
+}

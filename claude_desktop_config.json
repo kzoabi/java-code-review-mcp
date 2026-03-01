@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "java-code-review": {
+      "command": "python",
+      "args": ["src/server.py"],
+      "env": {},
+      "description": "Java Code Review MCP Server"
+    }
+  }
+}
