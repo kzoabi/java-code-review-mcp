@@ -31,6 +31,20 @@ ZONE2_VERBS = {'validate', 'process', 'handle', 'execute', 'perform', 'transform
 ZONE3_VERBS = {'get', 'fetch', 'load', 'parse', 'convert', 'find', 'query', 'read', 'write', 'check', 'exists'}
 
 
+def _find_balanced_close(text: str, open_pos: int) -> int:
+    """Find position after the closing brace that matches the opening brace at open_pos.
+    Returns -1 if the braces are not balanced within text."""
+    depth = 1
+    pos = open_pos + 1
+    while pos < len(text) and depth > 0:
+        if text[pos] == '{':
+            depth += 1
+        elif text[pos] == '}':
+            depth -= 1
+        pos += 1
+    return pos if depth == 0 else -1
+
+
 @dataclass
 class JBCTRuleIssue:
     rule: str
@@ -42,11 +56,21 @@ class JBCTRuleIssue:
 
 
 def is_domain_package(package: str, config: Dict) -> bool:
-    """Check if package is a domain package."""
+    """Check if package is a domain package.
+
+    Pattern matching: '**.domain.**' matches any package containing 'domain'
+    as a path segment (e.g. com.example.domain, com.example.domain.model).
+    """
     domain_patterns = config.get('jbct_packages', {}).get('domain_patterns', [])
+    pkg_dotted = '.' + package + '.'  # e.g. .com.example.domain.
     for pattern in domain_patterns:
-        pattern = pattern.replace('**', '')
-        if pattern in package:
+        inner = pattern.replace('**', '')  # e.g. '.domain.'
+        inner = inner.strip('.')           # e.g. 'domain'
+        if not inner:
+            continue
+        segment = '.' + inner + '.'
+        # Match segment anywhere in the dotted package string, or exact match
+        if segment in pkg_dotted or package == inner or package.startswith(inner + '.'):
             return True
     return False
 
@@ -83,7 +107,10 @@ def check_return_types(content: str, lines: List[str], config: Dict) -> List[JBC
                     suggestion="Return Result<T> or Promise<T> instead of void when method can fail"
                 ))
         
-        if return_null_pattern.search(content[match.end():match.end() + 100]):
+        open_brace = match.end() - 1
+        body_end = _find_balanced_close(content, open_brace)
+        method_body = content[match.end():body_end - 1] if body_end != -1 else content[match.end():match.end() + 100]
+        if return_null_pattern.search(method_body):
             issues.append(JBCTRuleIssue(
                 rule='JBCT-RET-03',
                 severity='error',
@@ -190,13 +217,22 @@ def check_lambda_rules(content: str, lines: List[str], config: Dict) -> List[JBC
     """JBCT-LAM-01: No complex logic in lambdas (if, switch, try-catch).
        JBCT-LAM-02: No braces in lambdas - extract to methods."""
     issues = []
-    
-    lambda_pattern = re.compile(r'(\w+)\s*->\s*\{([^}]+)\}')
-    
+
+    arrow_with_brace = re.compile(r'\w+\s*->\s*\{')
+
     for i, line in enumerate(lines, 1):
-        for match in lambda_pattern.finditer(line):
-            lambda_body = match.group(2)
-            
+        pos = 0
+        while True:
+            m = arrow_with_brace.search(line, pos)
+            if not m:
+                break
+            brace_pos = m.end() - 1  # position of opening '{'
+            close_pos = _find_balanced_close(line, brace_pos)
+            if close_pos == -1:
+                pos = m.end()
+                continue
+            lambda_body = line[brace_pos + 1:close_pos - 1]
+
             if re.search(r'\bif\s*\(', lambda_body) or re.search(r'\bswitch\s*\(', lambda_body):
                 issues.append(JBCTRuleIssue(
                     rule='JBCT-LAM-01',
@@ -206,7 +242,7 @@ def check_lambda_rules(content: str, lines: List[str], config: Dict) -> List[JBC
                     message="Complex logic (if/switch) in lambda - extract to named method",
                     suggestion="Extract conditional logic to a separate method and use method reference"
                 ))
-            
+
             if re.search(r'\btry\s*\{', lambda_body) or re.search(r'\bcatch\s*\(', lambda_body):
                 issues.append(JBCTRuleIssue(
                     rule='JBCT-LAM-01',
@@ -216,7 +252,7 @@ def check_lambda_rules(content: str, lines: List[str], config: Dict) -> List[JBC
                     message="Try-catch in lambda - use Result.recover() instead",
                     suggestion="Use .recover() method on Result/Promise for error handling"
                 ))
-            
+
             if lambda_body.count('{') > 1 or lambda_body.count(';') > 1:
                 issues.append(JBCTRuleIssue(
                     rule='JBCT-LAM-02',
@@ -226,7 +262,9 @@ def check_lambda_rules(content: str, lines: List[str], config: Dict) -> List[JBC
                     message="Multi-statement lambda body - extract to named method",
                     suggestion="Extract complex lambda body to a separate method"
                 ))
-    
+
+            pos = close_pos
+
     return issues
 
 
@@ -378,30 +416,15 @@ def check_zones(content: str, lines: List[str], config: Dict, package: str) -> L
                         suggestion=f"Use Zone 2 verb: validate, process, handle, execute, perform, transform"
                     ))
     
-    leaf_method_pattern = re.compile(r'(?:private|public|protected)?\s*(?:static)?\s*\w+(?:<[^>]+>)?\s+((?:get|fetch|load|parse|convert|find|query)\w*)\s*\([^)]*\)\s*(?:throws\s+[^{]+)?\{')
-    
-    for match in leaf_method_pattern.finditer(content):
-        method_name = match.group(1)
-        line_num = content[:match.start()].count('\n') + 1
-        
-        if any(method_name.lower().startswith(v) for v in zone3_verbs):
-            if is_domain:
-                issues.append(JBCTRuleIssue(
-                    rule='JBCT-ZONE-02',
-                    severity='warning',
-                    category='zones',
-                    line=line_num,
-                    message=f"Leaf method '{method_name}' in domain uses Zone 3 verb - appropriate for leaf",
-                    suggestion="Zone 3 verbs (get, fetch, parse) are correct for leaf/adapter methods"
-                ))
-    
     sequencer_pattern = re.compile(r'\.(?:flatMap|map)\s*\([^)]+\.(?:flatMap|map)')
-    if sequencer_pattern.search(content):
+    seq_match = sequencer_pattern.search(content)
+    if seq_match:
+        seq_line = content[:seq_match.start()].count('\n') + 1
         issues.append(JBCTRuleIssue(
             rule='JBCT-ZONE-03',
             severity='warning',
             category='zones',
-            line=1,
+            line=seq_line,
             message="Zone mixing detected in sequencer chain",
             suggestion="Avoid mixing different zone types in flatMap/map chains"
         ))
@@ -442,12 +465,14 @@ def check_return_types_2(content: str, lines: List[str], config: Dict) -> List[J
                 ))
     
     return_result_pattern = re.compile(r'Result\<\w+\>\s+\w+\s*=.*Result\.success\(')
-    if return_result_pattern.search(content):
+    ret_match = return_result_pattern.search(content)
+    if ret_match:
+        ret_line = content[:ret_match.start()].count('\n') + 1
         issues.append(JBCTRuleIssue(
             rule='JBCT-RET-05',
             severity='warning',
             category='return-types',
-            line=1,
+            line=ret_line,
             message="Always-succeeding Result - return T directly instead",
             suggestion="If Result always succeeds, return T directly instead of Result<T>"
         ))
@@ -815,7 +840,11 @@ def check_usecase_pattern(content: str, lines: List[str], config: Dict) -> List[
     return issues
 
 
-def run_jbct_analysis(file_path: str, config: Dict, package: str = "") -> Dict:
+_JBCT_STYLE_CATEGORIES = {'style', 'naming', 'logging', 'static-imports', 'utilities'}
+
+
+def run_jbct_analysis(file_path: str, config: Dict, package: str = "",
+                      review_level: str = "full") -> Dict:
     """Run JBCT compliance analysis on a Java file."""
     result = {
         'file_path': file_path,
@@ -889,6 +918,12 @@ def run_jbct_analysis(file_path: str, config: Dict, package: str = "") -> Dict:
     if jbct_rules.get('usecase', True):
         all_issues.extend(check_usecase_pattern(content, lines, config))
     
+    # F7 — Apply review_level filtering
+    if review_level == 'quick':
+        all_issues = [i for i in all_issues if i.category not in _JBCT_STYLE_CATEGORIES]
+    elif review_level == 'security':
+        all_issues = []  # JBCT rules are not security-focused
+
     for issue in all_issues:
         result['issues'].append({
             'rule': issue.rule,
@@ -898,12 +933,12 @@ def run_jbct_analysis(file_path: str, config: Dict, package: str = "") -> Dict:
             'message': issue.message,
             'suggestion': issue.suggestion
         })
-        
+
         if issue.severity == 'error':
             result['summary']['errors'] += 1
         else:
             result['summary']['warnings'] += 1
-    
+
     return result
 
 

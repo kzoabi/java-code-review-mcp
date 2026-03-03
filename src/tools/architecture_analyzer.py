@@ -33,29 +33,38 @@ def get_package_from_path(file_path: str) -> str:
         match = re.search(r'package\s+([\w.]+)\s*;', content)
         if match:
             return match.group(1)
-    except:
+    except (OSError, UnicodeDecodeError):
         pass
     return ""
+
+
+def _matches_package_pattern(package: str, patterns: list) -> bool:
+    """Check whether *package* matches any of the given glob-style patterns.
+
+    Pattern syntax: '**.domain.**' → matches any package that contains
+    'domain' as a segment (e.g. com.example.domain, com.example.domain.model).
+    """
+    pkg_dotted = '.' + package + '.'
+    for pattern in patterns:
+        inner = pattern.replace('**', '').strip('.')
+        if not inner:
+            continue
+        segment = '.' + inner + '.'
+        if segment in pkg_dotted or package == inner or package.startswith(inner + '.'):
+            return True
+    return False
 
 
 def is_domain_package(package: str, config: Dict) -> bool:
     """Check if package is a domain package."""
     domain_patterns = config.get('jbct_packages', {}).get('domain_patterns', [])
-    for pattern in domain_patterns:
-        pattern = pattern.replace('**', '')
-        if pattern in package:
-            return True
-    return False
+    return _matches_package_pattern(package, domain_patterns)
 
 
 def is_adapter_package(package: str, config: Dict) -> bool:
     """Check if package is an adapter package."""
     adapter_patterns = config.get('jbct_packages', {}).get('adapter_patterns', [])
-    for pattern in adapter_patterns:
-        pattern = pattern.replace('**', '')
-        if pattern in package:
-            return True
-    return False
+    return _matches_package_pattern(package, adapter_patterns)
 
 
 def is_usecase_package(package: str) -> bool:
@@ -64,8 +73,8 @@ def is_usecase_package(package: str) -> bool:
 
 
 def extract_imports(content: str) -> List[str]:
-    """Extract all import statements from Java file."""
-    import_pattern = re.compile(r'import\s+([\w.]+)\.\w+;')
+    """Extract all import statements from Java file, including wildcard imports."""
+    import_pattern = re.compile(r'import\s+(?:static\s+)?([\w.]+)(?:\.\w+|\.\*);')
     return [match.group(1) for match in import_pattern.finditer(content)]
 
 
@@ -110,11 +119,11 @@ def analyze_package_structure(project_path: str, config: Dict) -> Dict:
             with open(java_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             packages[package].imports.extend(extract_imports(content))
-            
+
             class_pattern = re.compile(r'(?:public\s+)?(?:class|interface|record)\s+(\w+)')
             for match in class_pattern.finditer(content):
                 packages[package].classes.append(match.group(1))
-        except:
+        except (OSError, UnicodeDecodeError):
             pass
     
     result['packages'] = {k: {

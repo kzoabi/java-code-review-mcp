@@ -19,6 +19,20 @@ DEFAULT_CONFIG = {
         'recommend_var_keyword': True,
         'recommend_pattern_matching': True
     },
+    'jdk21_features': {
+        'recommend_virtual_threads': True,
+        'recommend_structured_concurrency': True,
+        'recommend_string_templates': True,
+    },
+    'spring_enabled': False,
+    'spring_rules': {
+        'transactional': True,
+        'field_injection': True,
+        'missing_stereotype': True,
+        'rest_return_types': True,
+        'value_fallback': True,
+        'circular_autowired': True,
+    },
     'security': {
         'check_hardcoded_secrets': True,
         'check_sql_injection': True,

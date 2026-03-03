@@ -53,6 +53,19 @@ def parse_java_file(file_path: str) -> JavaFileAnalysis:
         source_code = f.read()
     return parse_java_source(file_path, source_code)
 
+def find_end_line(lines: List[str], start_line: int) -> int:
+    """Scan forward from start_line (1-indexed) counting braces to find the closing }."""
+    depth = 0
+    for i in range(start_line - 1, len(lines)):
+        for ch in lines[i]:
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return i + 1  # 1-indexed
+    return len(lines)
+
 def parse_java_source(file_path: str, source_code: str) -> JavaFileAnalysis:
     lines = source_code.split('\n')
     total_lines = len(lines)
@@ -84,15 +97,17 @@ def parse_java_source(file_path: str, source_code: str) -> JavaFileAnalysis:
         imports.append(ImportInfo(name=name, is_static=imp.static, is_on_demand=imp.wildcard))
     classes = []
     for path, node in tree.filter(javalang.tree.ClassDeclaration):
-        class_info = extract_class_info(node)
+        class_info = extract_class_info(node, lines)
         classes.append(class_info)
     return JavaFileAnalysis(file_path=file_path, package=package, imports=imports, classes=classes, total_lines=total_lines, code_lines=code_lines, comment_lines=comment_lines, blank_lines=blank_lines, raw_tree=tree)
 
-def extract_class_info(node: javalang.tree.ClassDeclaration) -> ClassInfo:
+def extract_class_info(node: javalang.tree.ClassDeclaration, lines: List[str]) -> ClassInfo:
     methods = []
     fields = []
     for child_path, child_node in node.filter(javalang.tree.MethodDeclaration):
-        method_info = MethodInfo(name=child_node.name, return_type=str(child_node.return_type) if child_node.return_type else 'void', parameters=[(p.name, str(p.type)) for p in child_node.parameters], modifiers=list(child_node.modifiers), body_lines=len(child_node.body) if child_node.body else 0, start_line=child_node.position.line if child_node.position else 0, end_line=child_node.position.line if child_node.position else 0, exceptions=[str(e) for e in child_node.throws] if child_node.throws else [])
+        m_start = child_node.position.line if child_node.position else 0
+        m_end = find_end_line(lines, m_start) if m_start else 0
+        method_info = MethodInfo(name=child_node.name, return_type=str(child_node.return_type) if child_node.return_type else 'void', parameters=[(p.name, str(p.type)) for p in child_node.parameters], modifiers=list(child_node.modifiers), body_lines=len(child_node.body) if child_node.body else 0, start_line=m_start, end_line=m_end, exceptions=[str(e) for e in child_node.throws] if child_node.throws else [])
         methods.append(method_info)
     for child_path, child_node in node.filter(javalang.tree.FieldDeclaration):
         for var in child_node.declarators:
@@ -101,7 +116,9 @@ def extract_class_info(node: javalang.tree.ClassDeclaration) -> ClassInfo:
     implements = [str(i) for i in node.implements] if node.implements else []
     is_record = 'record' in node.modifiers
     is_sealed = 'sealed' in node.modifiers
-    return ClassInfo(name=node.name, modifiers=list(node.modifiers), extends=extends, implements=implements, fields=fields, methods=methods, start_line=node.position.line if node.position else 0, end_line=node.position.line if node.position else 0, is_record=is_record, is_sealed=is_sealed)
+    c_start = node.position.line if node.position else 0
+    c_end = find_end_line(lines, c_start) if c_start else 0
+    return ClassInfo(name=node.name, modifiers=list(node.modifiers), extends=extends, implements=implements, fields=fields, methods=methods, start_line=c_start, end_line=c_end, is_record=is_record, is_sealed=is_sealed)
 
 def analyze_java_file(file_path: str) -> Dict[str, Any]:
     analysis = parse_java_file(file_path)
