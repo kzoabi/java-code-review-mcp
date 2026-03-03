@@ -8,7 +8,19 @@ MAGIC_NUMBER_PATTERN = re.compile(r'\b\d{3,}\b')
 SENSITIVE_PATTERNS = [re.compile(r'password\s*=', re.I), re.compile(r'api[_-]?key\s*=', re.I), re.compile(r'secret\s*=', re.I), re.compile(r'token\s*=', re.I), re.compile(r'private[_-]?key\s*=', re.I)]
 SQL_PATTERNS = [re.compile(r'\bexecute\s*\(\s*["\'].*\+', re.I), re.compile(r'\bcreateStatement\s*\(\s*\)', re.I)]
 
-async def run_static_analysis(file_path: str, tools: str, config: Dict) -> Dict:
+# F7 — issue categories considered non-style (kept in "quick" mode)
+_QUICK_CATEGORIES = {'security', 'exception', 'design'}
+_QUICK_SEVERITIES = {'critical', 'major'}
+
+# F2 — Java 21 detection patterns
+_VIRTUAL_THREAD_PATTERN = re.compile(r'\bnew\s+Thread\s*\(', re.MULTILINE)
+_EXECUTOR_THREAD_POOL = re.compile(r'Executors\.(newFixedThreadPool|newCachedThreadPool|newSingleThreadExecutor)\s*\(')
+_SWITCH_PATTERN_MATCH = re.compile(r'\bswitch\s*\([^)]+\)\s*\{', re.MULTILINE)
+_FUTURE_PATTERN = re.compile(r'\bCompletableFuture\b')
+_STRING_TEMPLATE_CANDIDATE = re.compile(r'"[^"]*"\s*\+\s*\w+\s*\+\s*"[^"]*"')
+
+
+async def run_static_analysis(file_path: str, tools: str, config: Dict, review_level: str = "full") -> Dict:
     """Run static analysis on a Java file."""
     result = {'file_path': file_path, 'issues': [], 'jdk17_suggestions': [], 'jbct_issues': []}
     if not os.path.exists(file_path):
@@ -56,15 +68,14 @@ async def run_static_analysis(file_path: str, tools: str, config: Dict) -> Dict:
                             break
                     if has_subclasses:
                         result['jdk17_suggestions'].append({'line': cls.start_line, 'category': 'jdk17', 'message': f"Class '{cls.name}' has subclasses - consider Sealed class", 'suggestion': 'Use sealed class for controlled inheritance'})
-        catch_blocks = re.findall(r'catch\s*\([^)]+\)\s*\{[^}]*\}', content, re.DOTALL)
-        for block in catch_blocks:
-            if 'catch' in block and re.search(r'catch\s*\([^)]*\)\s*\{\s*\}', block):
-                result['issues'].append({'line': 1, 'severity': 'major', 'category': 'exception', 'message': 'Empty catch block', 'rule': 'EmptyCatchBlock'})
+        for match in re.finditer(r'catch\s*\([^)]+\)\s*\{\s*\}', content):
+            line_num = content[:match.start()].count('\n') + 1
+            result['issues'].append({'line': line_num, 'severity': 'major', 'category': 'exception', 'message': 'Empty catch block', 'rule': 'EmptyCatchBlock'})
         if config.get('jdk17_features', {}).get('recommend_switch_expressions', True):
             if re.search(r'switch\s*\([^)]+\)\s*\{', content) and '->' not in content:
                 result['jdk17_suggestions'].append({'line': 1, 'category': 'jdk17', 'message': 'Traditional switch statement found', 'suggestion': 'Consider using switch expressions (Java 14+)'})
         if config.get('jdk17_features', {}).get('recommend_text_blocks', True):
-            if re.search(r'String\s+\w+\s*=\s*"[^"]*\n', content):
+            if re.search(r'"[^"]*"\s*\+\s*\n\s*"', content):
                 result['jdk17_suggestions'].append({'line': 1, 'category': 'jdk17', 'message': 'Multiline string concatenation found', 'suggestion': 'Consider using Text Blocks (Java 15+)'})
         if config.get('jdk17_features', {}).get('recommend_var_keyword', True):
             for i, line in enumerate(lines, 1):
@@ -87,13 +98,63 @@ async def run_static_analysis(file_path: str, tools: str, config: Dict) -> Dict:
                 from src.tools.java_parser import parse_java_file
                 analysis = parse_java_file(file_path)
                 package = analysis.package or ""
-            except:
+            except Exception:
                 pass
-            
-            jbct_result = run_jbct_analysis(file_path, config, package)
+
+            jbct_result = run_jbct_analysis(file_path, config, package, review_level=review_level)
             if 'issues' in jbct_result:
                 result['jbct_issues'] = jbct_result['issues']
         except Exception as e:
             result['jbct_error'] = str(e)
-    
+
+    # F2 — Java 21 suggestions
+    jdk21 = config.get('jdk21_features', {})
+    if jdk21.get('recommend_virtual_threads', True):
+        for m in _VIRTUAL_THREAD_PATTERN.finditer(content):
+            line_num = content[:m.start()].count('\n') + 1
+            result['jdk17_suggestions'].append({
+                'line': line_num, 'category': 'jdk21',
+                'message': 'Raw Thread construction found',
+                'suggestion': 'Use Thread.ofVirtual().start(...) or Thread.ofPlatform() (Java 21+)'
+            })
+        for m in _EXECUTOR_THREAD_POOL.finditer(content):
+            line_num = content[:m.start()].count('\n') + 1
+            result['jdk17_suggestions'].append({
+                'line': line_num, 'category': 'jdk21',
+                'message': f'Legacy executor factory {m.group(1)} found',
+                'suggestion': 'Consider Executors.newVirtualThreadPerTaskExecutor() for I/O-bound tasks (Java 21+)'
+            })
+    if jdk21.get('recommend_structured_concurrency', True):
+        if _FUTURE_PATTERN.search(content):
+            result['jdk17_suggestions'].append({
+                'line': 1, 'category': 'jdk21',
+                'message': 'CompletableFuture usage detected',
+                'suggestion': 'Consider StructuredTaskScope for structured concurrency (Java 21+)'
+            })
+    if jdk21.get('recommend_string_templates', True):
+        for m in _STRING_TEMPLATE_CANDIDATE.finditer(content):
+            line_num = content[:m.start()].count('\n') + 1
+            result['jdk17_suggestions'].append({
+                'line': line_num, 'category': 'jdk21',
+                'message': 'String concatenation with variables found',
+                'suggestion': 'Consider String Templates STR."Hello \\{name}" (Java 21 preview)'
+            })
+            break  # one suggestion per file is enough
+
+    # F7 — Apply review_level filtering
+    if review_level == 'quick':
+        result['issues'] = [
+            i for i in result['issues']
+            if i.get('severity') in _QUICK_SEVERITIES and i.get('category') in _QUICK_CATEGORIES
+        ]
+        result['jdk17_suggestions'] = []
+        result['jbct_issues'] = [
+            i for i in result.get('jbct_issues', [])
+            if i.get('severity') == 'error'
+        ]
+    elif review_level == 'security':
+        result['issues'] = [i for i in result['issues'] if i.get('category') == 'security']
+        result['jdk17_suggestions'] = []
+        result['jbct_issues'] = []
+
     return result

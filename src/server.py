@@ -3,6 +3,7 @@ import os
 import sys
 import logging
 from pathlib import Path
+from typing import Dict
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -36,24 +37,55 @@ async def review_java_file(file_path: str, output_format: str = "markdown", revi
         return f"Error: {str(e)}"
 
 @mcp.tool()
-async def review_java_git_diff(repo_path: str = ".", output_format: str = "markdown", review_level: str = "full") -> str:
-    """Review uncommitted changes (git diff)."""
-    logger.info(f"Reviewing git diff in: {repo_path}")
+async def review_java_git_diff(
+    repo_path: str = ".",
+    output_format: str = "markdown",
+    review_level: str = "full",
+    ref: str = "",
+    staged: bool = False,
+) -> str:
+    """Review Java changes from git diff.
+
+    By default reviews uncommitted (unstaged) changes.
+
+    Args:
+        repo_path:     Path to git repository root.
+        output_format: markdown, json, or sarif.
+        review_level:  full | quick | security.
+        ref:           Compare against a git ref (e.g. HEAD~1, main, a SHA).
+                       Mutually exclusive with staged.
+        staged:        When True, review only staged changes (git diff --cached).
+    """
+    logger.info(f"Reviewing git diff in: {repo_path} (ref={ref!r}, staged={staged})")
     try:
         config = get_config()
-        result = await review_git_diff(repo_path, review_level, config)
+        result = await review_git_diff(repo_path, review_level, config, ref=ref, staged=staged)
         return generate_report(result, output_format)
     except Exception as e:
         logger.error(f"Error reviewing git diff: {e}")
         return f"Error: {str(e)}"
 
 @mcp.tool()
-async def review_java_project(project_path: str, output_format: str = "markdown", review_level: str = "full", include_deps: bool = True) -> str:
-    """Review an entire Java project."""
+async def review_java_project(
+    project_path: str,
+    output_format: str = "markdown",
+    review_level: str = "full",
+    include_deps: bool = True,
+    use_cache: bool = True,
+) -> str:
+    """Review an entire Java project (includes architecture analysis).
+
+    Args:
+        project_path:  Path to Java project root.
+        output_format: markdown, json, or sarif.
+        review_level:  full | quick | security.
+        include_deps:  Whether to analyse Maven/Gradle dependencies.
+        use_cache:     Cache per-file results keyed by mtime (skip unchanged files).
+    """
     logger.info(f"Reviewing project: {project_path}")
     try:
         config = get_config()
-        result = await review_project(project_path, review_level, config, include_deps)
+        result = await review_project(project_path, review_level, config, include_deps, use_cache)
         return generate_report(result, output_format)
     except Exception as e:
         logger.error(f"Error reviewing project: {e}")
@@ -175,6 +207,51 @@ async def get_jbct_config() -> str:
         for p in patterns:
             md += f"- {p}\n"
     return md
+
+@mcp.tool()
+async def analyze_spring_compliance(file_path: str, output_format: str = "markdown") -> str:
+    """Analyze a Java file (or project directory) for Spring Boot / Spring Framework issues.
+
+    Checks for:
+    - @Transactional on non-public methods (silently ignored by Spring proxy)
+    - @Autowired field injection (prefer constructor injection)
+    - Missing @Service/@Repository/@Component stereotypes
+    - @RestController methods returning raw types instead of ResponseEntity
+    - @Value with hardcoded fallbacks that mask missing config
+    - Circular @Autowired dependencies
+
+    Args:
+        file_path:     Path to a Java file or project directory.
+        output_format: markdown, json, or sarif.
+    """
+    logger.info(f"Running Spring compliance analysis on: {file_path}")
+    try:
+        from src.tools.spring_analyzer import run_spring_analysis
+        config = get_config()
+        if os.path.isdir(file_path):
+            combined: Dict = {
+                'project_path': file_path,
+                'issues': [],
+                'spring_issues': [],
+                'summary': {'errors': 0, 'warnings': 0},
+            }
+            for root, dirs, files in os.walk(file_path):
+                dirs[:] = [d for d in dirs if d not in ('target', 'build', '.git')]
+                for fname in files:
+                    if fname.endswith('.java'):
+                        fpath = os.path.join(root, fname)
+                        r = run_spring_analysis(fpath, config)
+                        combined['issues'].extend(r.get('issues', []))
+                        combined['summary']['errors'] += r['summary']['errors']
+                        combined['summary']['warnings'] += r['summary']['warnings']
+            result = combined
+        else:
+            result = run_spring_analysis(file_path, config)
+        return generate_report(result, output_format)
+    except Exception as e:
+        logger.error(f"Error in Spring compliance analysis: {e}")
+        return f"Error: {str(e)}"
+
 
 @mcp.tool()
 async def analyze_java_architecture(project_path: str, output_format: str = "markdown") -> str:

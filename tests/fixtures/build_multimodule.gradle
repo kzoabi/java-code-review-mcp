@@ -1,0 +1,10 @@
+// Root build.gradle
+plugins {
+    id 'java'
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter:3.2.0'
+    implementation 'com.google.guava:guava:32.1.2-jre'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+}
