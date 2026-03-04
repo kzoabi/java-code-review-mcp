@@ -301,7 +301,10 @@ def main():
     else:
         logger.warning(f"Config file not found: {config_path}, using defaults")
         load_config()
-    mcp.run(transport="stdio")
+    try:
+        mcp.run(transport="stdio")
+    except KeyboardInterrupt:
+        logger.info("Server stopped.")
 
 if __name__ == "__main__":
     main()
