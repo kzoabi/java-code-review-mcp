@@ -35,7 +35,7 @@ def generate_sarif_report(result: Dict) -> str:
             "driver": {
                 "name": "Java Code Review MCP",
                 "version": "1.0.0",
-                "informationUri": "https://github.com/java-code-review-mcp",
+                "informationUri": "https://github.com/kzoabi/java-code-review-mcp",
                 "rules": []
             }
         },
@@ -60,7 +60,7 @@ def generate_sarif_report(result: Dict) -> str:
                 "id": rule_key,
                 "name": category.title(),
                 "shortDescription": {"text": message[:100]},
-                "helpUri": f"https://github.com/java-code-review-mcp/rules#{rule_key.lower()}"
+                "helpUri": f"https://github.com/kzoabi/java-code-review-mcp/rules#{rule_key.lower()}"
             }
             run["tool"]["driver"]["rules"].append(rules_map[rule_key])
 
